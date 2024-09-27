@@ -1,0 +1,721 @@
+#!/bin/bash
+
+# sudo apt-get update && sudo apt-get install -y dialog && curl -sSL https://raw.githubusercontent.com/suprunov/envmaker/refs/heads/master/dlg | bash
+
+LOG_FILE=~/installer.log
+truncate -s 0 "$LOG_FILE"
+
+
+USERNAME=$USER
+NAME="Your name"
+EMAIL="${USERNAME}@cargonomica.com"
+LOCAL_MYSQL_USER="$USERNAME"    
+LOCAL_MYSQL_PASSWORD="qazqaz012"
+LOCAL_PGSQL_USER="$USERNAME"
+LOCAL_PGSQL_PASSWORD="qazqaz012"
+
+declare -A PHP_VERSIONS=(
+      ["8.2"]="PHP 8.2"
+      ["8.3"]="PHP 8.3")
+
+
+declare -A NODE_VERSIONS=(
+      ["20"]="Nodejs v20.x"
+      ["21"]="Nodejs v21.x"
+      ["22"]="Nodejs v22.x"      )
+
+declare -A INITIAL_BASIC_DEPS=(
+    ["php"]="Основной пакет интерпретатора PHP."
+    ["nodejs"]="JavaScript-движок для серверного программирования."
+    ["mysql"]="Система управления базами данных (СУБД)."
+    ["postgresql"]="Расширенная реляционная СУБД с поддержкой SQL."
+    ["curl"]="Инструмент для работы с URL и HTTP-запросами."
+    ["git"]="Система контроля версий для управления кодом."
+    ["unzip"]="Утилита для распаковки ZIP-архивов."
+    ["wget"]="Инструмент для загрузки файлов по HTTP, HTTPS и FTP."
+    ["apache2"]="Веб-сервер для хостинга веб-приложений."
+    ["software-properties-common"]="Утилиты для управления PPA и репозиториями."
+    ["lsb-release"]="Информация о версии дистрибутива Linux."
+    ["apt-transport-https"]="Поддержка HTTPS в apt."
+    ["mc"]="Midnight Commander, текстовый файловый менеджер."
+    ["nginx"]="Высокопроизводительный веб-сервер и реверс-прокси."
+    ["redis-server"]="Сервер in-memory базы данных Redis."
+    ["composer"]="Управление зависимостями для PHP-проектов."
+    ["logrotate"]="Утилита для управления логами системы."
+    ["supervisor"]="Управление процессами и демонами."
+    ["rsync"]="Инструмент для синхронизации файлов и каталогов."
+    ["inotify-tools"]="Инструменты для мониторинга файловых систем."
+    ["gawk"]="Расширенная версия AWK для обработки текстов."
+    ["wslu"]="Утилиты для работы с Windows Subsystem for Linux."
+    ["sshpass"]="Утилита для передачи паролей в SSH."
+   # ["msmtp"]="SMTP-клиент для отправки электронных писем."
+    ["sshfs"]="Файловая система для монтирования удаленных каталогов по SSH.")
+declare -A BASIC_DEPS=()
+
+declare -A INITIAL_PHP_DEPS=()
+declare -A PHP_DEPS=()
+
+declare -A INITIAL_NODE_DEPS=(
+      ["yarn"]="Менеджер пакетов для JavaScript."
+      ["vite"]="Сборщик и сервер для фронтенд-разработки."
+      ["pm2"]="Процессный менеджер для Nodejs приложений."
+      ["postgresql"]="Система управления реляционными базами данных."
+      ["sequelize"]="ORM для работы с SQL-базами данных."
+      ["nodemon"]="Утилита для автоматической перезагрузки Nodejs приложений."
+      ["mysql"]="Система управления реляционными базами данных."
+      ["husky"]="Инструменты для работы с git-хуками.")
+declare -A NODE_DEPS=()
+
+declare -A INITIAL_COMPOSER_DEPS=()
+declare -A COMPOSER_DEPS=()
+
+
+log() { # Функция для логирования сообщений с указанием уровня
+    local message="$1"
+    local timestamp
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$timestamp: $message" >> "$LOG_FILE"
+}
+
+select_group() {
+    local title="$1"
+    local deps
+    declare -n deps="$2"
+    local order=()
+    local options=()
+    for key in "${!deps[@]}"; do
+        order+=("$key")
+    done
+    IFS=$'\n' read -r -d '' -a sorted_keys < <(printf '%s\n' "${order[@]}" | sort -z)
+    unset IFS
+    for key in "${sorted_keys[@]}"; do
+        options+=("$key" "${deps[$key]}" "on")
+    done
+    if ! selected=$(dialog --checklist "$title" 20 60 12 "${options[@]}" --stdout); then
+        echo ""
+        return 0
+    fi
+    IFS=' ' read -r -a selected_keys <<< "$selected"
+    local ordered_selected_keys=()
+    for key in "${sorted_keys[@]}"; do
+        if [[ " ${selected_keys[*]} " == *" $key "* ]]; then
+            ordered_selected_keys+=("$key")
+        fi
+    done
+    echo "${ordered_selected_keys[@]}"
+}
+
+select_item() {
+    local title="$1"
+    local -n items="$2"
+    local default_key="$3"
+    options=()
+    keys=("${!items[@]}")
+    for ((i=${#keys[@]}-1; i>=0; i--)); do
+        key="${keys[i]}"
+        if [[ "$key" == "$default_key" ]]; then
+            options+=("$key" "${items[$key]}" "on")
+        else
+            options+=("$key" "${items[$key]}" "")
+        fi
+    done
+    selection=$(dialog --title "$title" --radiolist "Выберите элемент:" 15 50 10 "${options[@]}" 3>&1 1>&2 2>&3)
+
+    if [ $? -eq 0 ]; then
+        echo "$selection"
+    else
+        echo ""
+    fi
+}
+
+calculate_dimensions() {
+    local title="$1"
+    local content="$2"
+    local screen_width
+    local max_width
+    local width
+    local height
+    local max_length
+    screen_width=$(tput cols)
+    max_width=$((screen_width * 80 / 100))
+    max_length=$(echo -e "$title\n$content" | awk '{print length}' | sort -n | tail -n 1)
+    width=$((max_length + 4))
+    width=$((width < max_width ? width : max_width))
+    height=10
+    echo "$width $height"
+}
+
+show_msg() { # Функция для отображения сообщения
+    local title="$1"
+    local message="$2"
+    read -r width height < <(calculate_dimensions "$title" "$message")
+    dialog --msgbox "$message" "$height" "$width"
+}
+
+get_bool() { # Функция для получения булевого значения (true/false)
+    local question="$1"
+    if dialog --yesno "$question" 10 30; then
+        echo true  # Возвращаем "true", если нажата кнопка "Да"
+    else
+        echo false # Возвращаем "false", если нажата кнопка "Нет" или окно закрыто
+    fi
+}
+
+get_value() { # Функция для получения значения от пользователя
+    local title="$1"
+    local default_value="$2"
+    local value
+    if [[ -n "$default_value" ]]; then
+        value=$(dialog --inputbox "$title" 10 50 "$default_value" 3>&1 1>&2 2>&3)
+    else
+        value=$(dialog --inputbox "$title" 10 50 3>&1 1>&2 2>&3)
+    fi
+    if [[ -n "$value" ]]; then
+        echo "$value"
+    else
+        echo ""
+    fi
+}
+
+get_password() { # Функция для получения пароля
+    local title="$1"
+    local default_value="$2"
+    local password
+    if [[ -n "$default_value" ]]; then
+        password=$(dialog --passwordbox "$title" 10 50 "$default_value" 3>&1 1>&2 2>&3)
+    else
+        password=$(dialog --passwordbox "$title" 10 50 3>&1 1>&2 2>&3)
+    fi
+    if [[ -n "$password" ]]; then
+        echo "$password"
+    else
+        echo ""
+    fi
+}
+
+get_content() { # Функция для отображения содержимого файла
+    local title="$1"
+    local file_path="$2"
+    local content
+    if [[ -f "$file_path" ]]; then
+        content=$(<"$file_path")
+        read -r width height < <(calculate_dimensions "$title" "$content")
+        dialog --textbox "$file_path" "$height" "$width"
+    else
+        show_msg "Файл не найден: $file_path"
+    fi
+}
+
+install_dependencies() { # Функция для установки зависимостей
+    log "Обновление зависимостей..."
+    if sudo apt-get update && sudo apt-get upgrade -y; then
+        log "Обновление завершено."
+    else
+        log "Ошибка при обновлении пакетов."
+        exit 1  # Выход при ошибке обновления
+    fi
+
+    for PKG in mc dialog; do
+        if ! dpkg -l | grep -q "${PKG}"; then
+            log "Установка ${PKG}..."
+            if sudo apt-get install -y "${PKG}"; then
+                log "${PKG} успешно установлен."
+            else
+                log "Ошибка при установке ${PKG}."
+                # exit 1  # Выход при ошибке установки
+            fi
+        else
+            log "${PKG} уже установлен."
+        fi
+    done
+}
+
+request_user_input() { # Функция для запроса параметров пользователя с помощью dialog
+    USERNAME=$(get_value "Введите имя пользователя:" "$USER")
+    NAME=$(get_value "Введите ваше имя:" "$NAME")
+    EMAIL=$(get_value "Введите ваш email:" "$EMAIL")
+    BASIC_DEPS=$(select_group "Выберите зависимости для установки:" INITIAL_BASIC_DEPS)
+    if [[ " ${BASIC_DEPS} " =~ " php " ]]; then
+        PHP_VERSION=$(select_item "Выберите версию PHP для установки" PHP_VERSIONS "8.2")
+        INITIAL_PHP_DEPS["php${PHP_VERSION}"]="Интерпретатор языка PHP."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-fpm"]="Менеджер процессов для PHP, улучшает производительность."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-cli"]="Интерфейс командной строки для запуска PHP-скриптов."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-mysql"]="Модуль для работы с базами данных MySQL."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-pgsql"]="Модуль для работы с PostgreSQL."
+        INITIAL_PHP_DEPS["php-redis"]="Модуль для работы с Redis, in-memory хранилище."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-xml"]="Библиотека для работы с XML-данными."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-mbstring"]="Работа с многобайтовыми строками (UTF-8)."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-zip"]="Модуль для работы с ZIP-архивами."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-curl"]="Модуль для HTTP-запросов с помощью CURL."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-gd"]="Библиотека для работы с изображениями."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-soap"]="Модуль для работы с SOAP веб-сервисами."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-intl"]="Интернационализация (форматы дат и чисел)."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-bcmath"]="Интерфейс для работы с большими числами."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-opcache"]="Кэширование байт-кода PHP для ускорения."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-imap"]="Работа с почтовыми протоколами IMAP."
+        INITIAL_PHP_DEPS["php-xdebug"]="Расширение для отладки PHP-приложений."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-ldap"]="Работа с LDAP (каталоги и аутентификация)."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-xmlrpc"]="Модуль для работы с XML-RPC протоколом."
+        INITIAL_PHP_DEPS["php-msgpack"]="Сериализация данных с помощью MsgPack."
+        INITIAL_PHP_DEPS["php-igbinary"]="Оптимизированная сериализация объектов в бинарный формат."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-dom"]="Обработка XML и HTML документов."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-exif"]="Извлечение метаданных из изображений."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-fileinfo"]="Определение типа файлов."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-json"]="Работа с JSON данными."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-openssl"]="Поддержка шифрования и SSL."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-iconv"]="Преобразование кодировок строк."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-tokenizer"]="Токенизация PHP-кода."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-mysqli"]="Модуль для работы с MySQL через MySQLi."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-pdo"]="Поддержка работы с базами данных через PDO."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-ctype"]="Проверка типов символов (необходим для Laravel)."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-gmp"]="Модуль для работы с большими числами."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-simplexml"]="Простая библиотека для работы с XML."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-bz2"]="Работа с сжатыми архивами BZIP2."
+        INITIAL_PHP_DEPS["php-imagick"]="Библиотека для работы с изображениями."
+        INITIAL_PHP_DEPS["php-ftp"]="Работа с FTP для загрузки файлов."
+        INITIAL_PHP_DEPS["php-memcached"]="Кэширование данных через Memcached."
+        INITIAL_PHP_DEPS["php-apcu"]="Поддержка кэширования данных в памяти (APC)."
+        INITIAL_PHP_DEPS["php${PHP_VERSION}-sodium"]="Криптографическая библиотека для безопасных операций."
+        INITIAL_PHP_DEPS["php-readline"]="Интерфейс для интерактивной командной строки."
+        PHP_DEPS=$(select_group "Выберите PHP-зависимости для установки:" "${INITIAL_PHP_DEPS}")
+    fi
+
+    if [[ " ${BASIC_DEPS} " =~ " nodejs " ]]; then
+        NODE_VERSION=$(select_item "Выберите версию Nodejs для установки" NODE_VERSIONS "22")
+        NODE_DEPS=$(select_group "Выберите зависимости Nodejs для глобальной установки:" "${INITIAL_NODE_DEPS}")
+    fi
+
+    if [[ " ${BASIC_DEPS} " =~ " mysql " ]]; then
+        LOCAL_MYSQL_USER=$(get_value "Введите имя пользователя для MySQL:" "$LOCAL_MYSQL_USER")
+        LOCAL_MYSQL_PASSWORD=$(get_value "Введите имя пользователя для MySQL:" "$LOCAL_MYSQL_PASSWORD")
+    fi
+
+    if [[ " ${BASIC_DEPS} " =~ " postgresql " ]]; then
+        LOCAL_PGSQL_USER=$(get_value "Введите имя пользователя для MySQL:" "$LOCAL_PGSQL_USER")
+        LOCAL_PGSQL_PASSWORD=$(get_value "Введите имя пользователя для MySQL:" "$LOCAL_PGSQL_PASSWORD")
+    fi
+}
+
+
+install_selected_php_deps() {
+    log "Установка выбранных PHP-зависимостей..."
+    log "Выбранные PHP-зависимости: ${PHP_DEPS}" 
+    IFS=' ' read -r -a SELECTED_PHP_DEPS <<< "$PHP_DEPS"
+    for PHP_DEP in "${SELECTED_PHP_DEPS[@]}"; do
+        if sudo apt-get install -y "${PHP_DEP}"; then
+            log "PHP версии ${PHP_DEP} успешно установлен."
+        else
+            log "Ошибка при установке ${PHP_DEP}."
+        fi
+    done
+}
+
+install_selected_node_deps() {
+    log "Установка обязательных Nodejs-зависимостей..."
+    mkdir -p ~/.npm-global
+    mkdir -p ~/.yarn/bin
+    npm config set prefix '~/.npm-global'
+    yarn config set prefix ~/.yarn
+    echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+    echo 'export PATH="$HOME/.yarn/bin:$PATH"' >> ~/.bashrc
+    source ~/.bashrc
+    yarn global add vite nodemon pm2 prettier eslint
+
+    log "Установка выбранных Nodejs-зависимостей..."
+    log "Выбранные Nodejs-зависимости: ${NODE_DEPS}" 
+    IFS=' ' read -r -a SELECTED_NODE_DEPS <<< "${NODE_DEPS}"
+    for NODE_DEP in "${SELECTED_NODE_DEPS[@]}"; do
+        if yarn global add "${NODE_DEP}"; then
+            log "${NODE_DEP} успешно установлен."
+        else
+            log "Ошибка при установке ${NODE_DEP}."
+        fi
+    done
+}
+
+install_selected_dependencies() { 
+    log "Установка выбранных зависимостей..."
+    log "Выбранные зависимости: ${BASIC_DEPS}" 
+    IFS=' ' read -r -a SELECTED_BASIC_DEPS <<< "$BASIC_DEPS"
+    for DEP in "${SELECTED_BASIC_DEPS[@]}"; do
+        log "Обработка зависимости: ${DEP}"  
+        if [[ " ${DEP} " =~ " nodejs " ]]; then
+            log "Установка Nodejs версии ${NODE_VERSION}..."
+            if sudo snap install node --channel="${NODE_VERSION}" --classic; then
+                log "Nodejs версии ${NODE_VERSION} успешно установлен."
+                install_selected_node_deps
+            else
+                log "Ошибка при установке Nodejs."
+            fi
+            sudo npm install -g npm@latest
+        elif [[ " ${DEP} " =~ " php " ]]; then
+            log "Установка PHP версии $PHP_VERSION..."
+            sudo add-apt-repository -y ppa:ondrej/php
+            sudo apt-get update
+            if sudo apt-get install -y "php${PHP_VERSION}"; then
+                log "PHP версии $PHP_VERSION успешно установлен."
+                install_selected_php_deps
+            else
+                log "Ошибка при установке PHP."
+            fi
+        elif [[ " ${DEP} " =~ " mysql " ]]; then
+            log "Установка MySQL..."
+            if sudo apt-get install -y mysql-server; then
+                log "MySQL успешно установлен."
+                log "Создание пользователя MySQL..."
+                sudo mysql -e "CREATE USER '${LOCAL_MYSQL_USER}'@'localhost' IDENTIFIED BY '${LOCAL_MYSQL_PASSWORD}';"
+                sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO '${LOCAL_MYSQL_USER}'@'localhost' WITH GRANT OPTION;"
+            else
+                log "Ошибка при установке MySQL."
+            fi
+        elif [[ " ${DEP} " =~ " postgresql " ]]; then
+            log "Установка PostgreSQL..."
+            if sudo apt-get install -y postgresql; then
+                log "PostgreSQL успешно установлен."
+                log "Создание пользователя PostgreSQL..."
+                sudo -u postgres psql -c "CREATE USER ${LOCAL_PGSQL_USER} WITH PASSWORD '${LOCAL_PGSQL_PASSWORD}';"
+            else
+                log "Ошибка при установке PostgreSQL."
+            fi
+        elif [[ " ${DEP} " =~ " nginx " ]]; then
+            log "Установка Nginx..."
+            if sudo apt-get install -y nginx; then
+                log "Nginx успешно установлен."
+            else
+                log "Ошибка при установке Nginx."
+            fi
+        elif [[ " ${DEP} " =~ " apache2 " ]]; then
+            log "Установка Apache2..."
+            if sudo apt-get install -y apache2; then
+                log "Apache2 успешно установлен."
+            else
+                log "Ошибка при установке Apache2."
+            fi
+        else
+            log "Установка ${INITIAL_BASIC_DEPS[${DEP}]}..."
+            if sudo apt-get install -y "${DEP}"; then
+                log "${INITIAL_BASIC_DEPS[${DEP}]} успешно установлен."
+            else
+                log "Ошибка при установке ${INITIAL_BASIC_DEPS[${DEP}]}."
+            fi
+        fi
+    done
+}
+
+# old -------------------------------------------------
+
+# Функция для настройки сервисов после установки
+old_configure_services() {
+    log "Настройка сервисов..."
+    for service in php8.2-fpm nginx mysql postgresql redis-server supervisor; do
+        sudo systemctl enable "$service"
+        sudo systemctl start "$service"
+    done
+}
+# Функция для добавления строки в /etc/sudoers
+old_add_sudoers_entry() {
+    local user="$1"
+    local entry="${user} ALL=(ALL) NOPASSWD: ALL"
+    if sudo grep -q "^${entry}$" /etc/sudoers; then
+        log "Запись '${entry}' уже существует в /etc/sudoers."
+        return
+    fi
+    if [[ ! -f /etc/sudoers.bak ]]; then
+        log "Создание резервной копии /etc/sudoers..."
+        sudo cp /etc/sudoers /etc/sudoers.bak
+    fi
+    log "Добавление записи '${entry}' в /etc/sudoers..."
+    echo "$entry" | sudo tee -a /etc/sudoers > /dev/null
+}
+# Функция для обновления системы и установки базовых пакетов
+old_install_dependencies() {
+    log "Обновление системы и установка зависимостей..."
+    sudo apt-get update && sudo apt-get upgrade -y
+    sudo apt-get install -y software-properties-common curl wget lsb-release apt-transport-https
+    sudo apt-get install -y mc nginx mysql-server postgresql redis-server git composer logrotate supervisor rsync inotify-tools gawk wslu sshpass msmtp sshfs
+    sudo add-apt-repository -y ppa:ondrej/php
+    sudo apt-get update
+    sudo apt-get install -y php8.2 php8.2-fpm
+    sudo apt-get install -y php8.2-cli php8.2-mysql php8.2-pgsql php8.2-redis php8.2-xml php8.2-mbstring php8.2-zip php8.2-curl php8.2-gd php8.2-soap php8.2-intl php8.2-bcmath php8.2-opcache php8.2-imap php8.2-xdebug php8.2-ldap php8.2-xmlrpc php8.2-readline php8.2-msgpack php8.2-igbinary
+}
+# Функция для создания файла ${HOME}/.ssh/config от имени обычного пользователя
+old_setup_ssh() {
+    log "Настройка SSH..."
+    if [[ ! -f ${HOME}/.ssh/id_rsa ]]; then
+        ssh-keygen -t rsa -b 4096 -C "${EMAIL}" -f "${HOME}/.ssh/id_rsa" -N ""
+    else
+        log "SSH-ключ уже существует."
+    fi
+    mkdir -p "${HOME}/.ssh"
+    cat <<- EOF > "${HOME}/.ssh/config"
+        Host gitlab
+            HostName gitlab.cargonomica.com
+            User git
+            Port 4122
+            IdentityFile ${HOME}/.ssh/id_rsa
+            Compression yes
+            ServerAliveInterval 60
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+        Host dev-server
+            HostName 172.16.10.70
+            Port 4122
+            User ${DEV_SERVER_LOGIN}
+            IdentityFile ${HOME}/.ssh/id_rsa
+            Compression yes
+            ServerAliveInterval 60
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+        Host test-server
+            HostName 172.16.10.60
+            Port 4122
+            User ${TEST_SERVER_LOGIN}
+            IdentityFile ${HOME}/.ssh/id_rsa
+            Compression yes
+            ServerAliveInterval 60
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+EOF
+    [ -d "${HOME}/.ssh" ] && chmod 700 "${HOME}/.ssh"
+    [ -f "${HOME}/.ssh/id_rsa" ] && chmod 600 "${HOME}/.ssh/id_rsa"
+    [ -f "${HOME}/.ssh/id_rsa.pub" ] && chmod 644 "${HOME}/.ssh/id_rsa.pub"
+    [ -f "${HOME}/.ssh/authorized_keys" ] && chmod 600 "${HOME}/.ssh/authorized_keys"
+    [ -f "${HOME}/.ssh/known_hosts" ] && chmod 644 "${HOME}/.ssh/known_hosts"
+    [ -f "${HOME}/.ssh/config" ] && chmod 600 "${HOME}/.ssh/config"
+    sshpass -p $DEV_SERVER_PASSWORD ssh-copy-id dev-server
+    sshpass -p $TEST_SERVER_PASSWORD ssh-copy-id test-server
+    if [[ ! -f /usr/local/bin/clip ]]; then
+        sudo ln -s /mnt/c/Windows/System32/clip.exe /usr/local/bin/clip
+    else
+        log "Символическая ссылка /usr/local/bin/clip уже существует."
+    fi
+    clip < "${HOME}/.ssh/id_rsa.pub"
+    wslview "https://gitlab.cargonomica.com/-/profile/keys"
+    read -p -r "Нажмите [Enter], когда добавите ключ на https://gitlab.cargonomica.com/-/profile/keys..."
+}
+old_create_projects_structure() {
+    log "Создание структуры проектов..."
+    cd "${HOME}" || exit
+    sudo chown -R "$USER:$USER" .
+    [[ ! -d ${HOME}/www ]] && mkdir -p "${HOME}/www"
+    cd "${HOME}/www" || exit
+    scp dev-server:/home/bitrix/backup/backup.tar.gz "${HOME}/www/backup.tar.gz"
+    tar -xzf backup.tar.gz
+    rm -f "${HOME}/www/backup.tar.gz"
+    for project in crm wagnermaier; do
+        cd "${HOME}/www/$project" || exit
+        ln -s ../_core/bitrix bitrix
+        ln -s ../_core/local local
+        #        ln -s ../_core/logs logs
+        #        ln -s ../_core/images images
+        #        ln -s ../_core/upload upload
+        ln -s ../_core/vendor vendor
+    done
+    find "${HOME}/www" -type d -exec chmod 2775 {} \;
+    find "${HOME}/www" -type f -exec chmod 664 {} \;
+}
+
+old_update_deps() {
+    sudo apt update
+    sudo apt upgrade -y
+    set_locale
+    sudo apt install mc -y
+    add_sudoers_entry "$USER"
+}
+old_git_settings() {
+    for repo in "${repos_list[@]}"; do
+        log "Настройка репозитория ${repos["$repo.name"]}"
+        cd "${repos["$repo.local"]}" || exit
+        git remote set-url origin "${repos["$repo.git"]}"
+        git remote -v
+        git config user.name "${NAME}"
+        git config user.email "${EMAIL}"
+        git config color.ui auto
+        git config advice.ignoredHook false
+        cat <<- EOF > "${repos["$repo.local"]}/.git/hooks/post-checkout"
+            #!/bin/bash
+            find . -type f -exec chmod 664 {} \;
+            find . -type d -exec chmod 2775 {} \;
+EOF
+        chmod +x "${repos["$repo.local"]}/.git/hooks/post-checkout"
+        cat <<- EOF > "${repos["$repo.local"]}/.git/hooks/prepare-commit-msg"
+            #!/bin/bash
+            BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+            COMMIT_MSG_FILE=$1
+            if ! grep -q "\[$BRANCH_NAME\]" "$COMMIT_MSG_FILE"; then
+            sed -i.bak -e "1s|^|[$BRANCH_NAME] |" "$COMMIT_MSG_FILE"
+            fi
+EOF
+        chmod +x "${repos["$repo.local"]}/.git/hooks/prepare-commit-msg"
+        cd "${repos["$repo.local"]}" || exit
+        if [ "${repos["$repo.update"]}" = "true" ]; then
+            git checkout .
+            git clean -df
+            git fetch --all
+            git checkout -B develop origin/develop
+        fi
+#       сat <<- EOF > "${repos["${repo}.local"]}/.nogsync"
+            #logs/
+            #*.log
+            #*.tmp
+            #bitrix/
+            #upload/
+            #EOF
+        if [ "${repos["$repo.sync"]}" = "true" ]; then
+            cat <<- EOF > "${HOME}/gsync/.${repo}.gsync"
+                [OPTIONS]
+                source="${repos["${repo}.local"]}"
+                target="dev-server:${repos["${repo}.remote"]}" 
+                links=true
+                perms=false 
+                times=true 
+                group=false
+                owner=false
+EOF
+            cat <<- EOF > "${HOME}/gsync/gsync-${repo}.conf"
+                [program:gsync-${repo}]
+                command=${HOME}/gsync/gsync --config=${HOME}/gsync/.${repo}.gsync
+                autostart=true
+                autorestart=true
+                stderr_logfile=/var/log/gsync-${repo}.err.log
+                stdout_logfile=/var/log/gsync-${repo}.out.log
+EOF
+            sudo cp -f "${HOME}/gsync/gsync-${repo}.conf" "/etc/supervisor/conf.d/gsync-${repo}.conf"
+            log "Для запуска синхронизации выполнить команды:"
+            log "sudo supervisorctl reread"
+            log "sudo supervisorctl update"
+            log "sudo supervisorctl start gsync-${repo}"
+        fi
+    done
+}
+old_set_locale() {
+    sudo locale-gen ru_RU.UTF-8
+    sudo update-locale LANG=ru_RU.UTF-8
+    sudo tee /etc/default/console-setup > /dev/null <<- EOF
+        CHARMAP="UTF-8"
+        CODESET="CyrSlav"
+        FONTFACE="Terminus"
+        FONTSIZE="16x32"
+EOF
+    sudo tee /etc/default/keyboard > /dev/null <<- EOF
+        XKBLAYOUT="us,ru"
+        XKBVARIANT=""
+        XKBOPTIONS="grp:alt_shift_toggle"
+EOF
+    sudo dpkg-reconfigure console-setup
+    echo 'export LANG=ru_RU.UTF-8' >> "${HOME}/.bashrc"
+    git config --global i18n.commitEncoding "UTF-8"
+    git config --global i18n.logOutputEncoding "UTF-8"
+    curl -o "${HOME}/.git-prompt.sh https://raw.githubusercontent.com/git/git/master/contrib/completion/git-prompt.sh"
+    cat <<- EOF >> ~/.bashrc
+        # Git Prompt Script
+        source "$HOME/.git-prompt.sh"
+        export GIT_PS1_SHOWDIRTYSTATE=true  # Показывать символы для незакоммиченных изменений
+        export GIT_PS1_SHOWSTASHSTATE=true   # Показывать состояние стэша
+        export GIT_PS1_SHOWUNTRACKEDFILES=true  # Показывать неотслеживаемые файлы
+        export GIT_PS1_SHOWUPSTREAM="auto"   # Показывать состояние upstream
+        # Настройка цветной командной строки
+        export PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]$(__git_ps1 " (\[\033[31m\]%s\[\033[00m\])")\$ '
+EOF
+    source "${HOME}/.bashrc"
+}
+# Функция для клонирования репозиториев и настройки окружения
+old_setup_projects() {
+    log "Клонирование репозиториев и настройка окружения..."
+    for project in "${repos_list[@]}"; do
+        if [[ ! -d "${repos["$project.local"]}" ]]; then
+            git clone "${repos["$project.git"]}" "${repos["$project.local"]}"
+        else
+           log "Репозиторий '${repos["$project.name"]}' уже склонирован."
+        fi
+        pushd "${repos["$project.local"]}" > /dev/null || exit
+        git reset --hard
+        git pull
+        git config user.name "$NAME"
+        git config user.email "$EMAIL"
+        if [[ "${repos["$project.husky"]}" == "true" && ! -f "${HOME}/.husky/_/husky.sh" ]]; then
+            npx husky install
+        else
+            log "Husky уже настроен."
+        fi
+        if [[ -f ${HOME}/www/${repos["$project.local"]}/composer.json ]]; then
+            composer install --ignore-platform-reqs
+        else
+            log "Файл composer.json отсутствует."
+        fi
+        if [[ -f ${HOME}/www/${repos["$project.local"]}/package.json ]]; then
+            yarn install --network-timeout=100000
+        else
+            log "Файл package.json отсутствует."
+        fi
+        [[ "${repos["$project.update"]}" == "true" ]] && yarn upgrade --latest
+        popd > /dev/null || exit
+    done
+    yarn global add gulp-cli || log "gulp-cli уже установлен."
+}
+old_mount_sshfs() {
+    mkdir -p ~/remote_mount
+    sshfs user@example.com:/var/www ~/remote_mount
+    # fusermount -u ~/remote_mount # размонтирование linux
+    # umount ~/remote_mount # размонтирование macos
+}
+old_install_rsync() {
+    git clone https://github.com/e-bash/gsync.git "${HOME}/gsync"
+    chmod +x "${HOME}/gsync/gsync"
+}
+
+
+# install_dependencies
+# request_user_input
+# install_selected_dependencies
+# inputbox - demonstrate the input dialog box with a temporary file
+
+# Define the dialog exit status codes
+: ${DIALOG_OK=0}
+: ${DIALOG_CANCEL=1}
+: ${DIALOG_HELP=2}
+: ${DIALOG_EXTRA=3}
+: ${DIALOG_ITEM_HELP=4}
+: ${DIALOG_ESC=255}
+
+# Create a temporary file and make sure it goes away when we're dome
+tmp_file=$(tempfile 2>/dev/null) || tmp_file=/tmp/test$$
+trap "rm -f $tmp_file" 0 1 2 5 15
+
+# Generate the dialog box
+dialog --title "INPUT BOX" \
+  --clear  \
+  --inputbox \
+"Hi, this is an input dialog box. You can use \n
+this to ask questions that require the user \n
+to input a string as the answer. You can \n
+input strings of length longer than the \n
+width of the input box, in that case, the \n
+input field will be automatically scrolled. \n
+You can use BACKSPACE to correct errors. \n\n
+Try entering your name below:" \
+16 51 2> $tmp_file
+
+# Get the exit status
+return_value=$?
+
+# Act on it
+case $return_value in
+  $DIALOG_OK)
+    echo "Result: `cat $tmp_file`";;
+  $DIALOG_CANCEL)
+    echo "Cancel pressed.";;
+  $DIALOG_HELP)
+    echo "Help pressed.";;
+  $DIALOG_EXTRA)
+    echo "Extra button pressed.";;
+  $DIALOG_ITEM_HELP)
+    echo "Item-help button pressed.";;
+  $DIALOG_ESC)
+    if test -s $tmp_file ; then
+      cat $tmp_file
+    else
+      echo "ESC pressed."
+    fi
+    ;;
+esac
