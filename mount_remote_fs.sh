@@ -48,7 +48,7 @@ if ssh -q -o ConnectTimeout=5 $REMOTE_HOST exit; then
         sudo fusermount -u "$LOCAL_PATH" 2>/dev/null
 
         # Монтирование папки
-        if sshfs -o "$MOUNT_MODE,allow_other,reconnect,ServerAliveInterval=30,ServerAliveCountMax=20,compression=yes,cache=yes" "${REMOTE_HOST}:${REMOTE_PATH}" "$LOCAL_PATH"; then
+        if sshfs -o "$MOUNT_MODE,follow_symlinks,allow_other,reconnect,ServerAliveInterval=30,ServerAliveCountMax=20,compression=yes,cache=yes" "${REMOTE_HOST}:${REMOTE_PATH}" "$LOCAL_PATH"; then
             echo "$DATE - Папка ${REMOTE_HOST}:${REMOTE_PATH} успешно смонтирована в ${LOCAL_PATH} в режиме ${MOUNT_MODE}" | tee -a "$LOG_FILE"
         else 
             echo "$DATE - Не удалось подмонтировать папку ${REMOTE_HOST}:${REMOTE_PATH} в ${LOCAL_PATH} в режиме ${MOUNT_MODE}" | tee -a "$LOG_FILE"
